@@ -121,7 +121,7 @@ def detect_tables(image: Image.Image) -> List[Dict[str, Any]]:
 
     target_sizes = torch.tensor([image.size[::-1]])
     results = detection_processor.post_process_object_detection(
-        outputs, threshold=0.7, target_sizes=target_sizes
+        outputs, threshold=0.5, target_sizes=target_sizes
     )[0]
 
     tables = []
@@ -152,7 +152,7 @@ def recognize_structure(image: Image.Image, table_bbox: List[float]) -> Dict[str
 
     target_sizes = torch.tensor([cropped.size[::-1]])
     results = structure_processor.post_process_object_detection(
-        outputs, threshold=0.6, target_sizes=target_sizes
+        outputs, threshold=0.5, target_sizes=target_sizes
     )[0]
 
     rows_raw = []
