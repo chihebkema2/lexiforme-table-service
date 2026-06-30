@@ -36,6 +36,10 @@ logger.info("Loading Table Transformer detection model...")
 detection_processor = AutoImageProcessor.from_pretrained(
     "microsoft/table-transformer-detection"
 )
+if hasattr(detection_processor, "size") and isinstance(detection_processor.size, dict):
+    if "shortest_edge" not in detection_processor.size and "height" not in detection_processor.size:
+        longest = detection_processor.size.get("longest_edge", 1000)
+        detection_processor.size = {"shortest_edge": longest, "longest_edge": longest}
 detection_model = TableTransformerForObjectDetection.from_pretrained(
     "microsoft/table-transformer-detection"
 ).to(DEVICE)
@@ -44,6 +48,14 @@ logger.info("Loading Table Transformer structure recognition model...")
 structure_processor = AutoImageProcessor.from_pretrained(
     "microsoft/table-transformer-structure-recognition-v1.1-all"
 )
+# The published preprocessor_config.json for this checkpoint only defines
+# {"longest_edge": ...}, which is not accepted by this transformers version's
+# resize() implementation (it requires height+width or shortest_edge+longest_edge).
+# Force a fully compatible size dict here.
+if hasattr(structure_processor, "size") and isinstance(structure_processor.size, dict):
+    if "shortest_edge" not in structure_processor.size and "height" not in structure_processor.size:
+        longest = structure_processor.size.get("longest_edge", 1000)
+        structure_processor.size = {"shortest_edge": longest, "longest_edge": longest}
 structure_model = TableTransformerForObjectDetection.from_pretrained(
     "microsoft/table-transformer-structure-recognition-v1.1-all"
 ).to(DEVICE)
