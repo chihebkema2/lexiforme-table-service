@@ -8,7 +8,7 @@ import io
 import base64
 import logging
 from typing import List, Dict, Any
-
+from core.validation import validate_geometry
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
