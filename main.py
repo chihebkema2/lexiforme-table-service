@@ -8,13 +8,19 @@ import io
 import base64
 import logging
 from typing import List, Dict, Any
-from core.validation import validate_geometry
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 import torch
 from transformers import AutoImageProcessor, TableTransformerForObjectDetection
+
+# Centralized Core Package Level Module Import Bindings[cite: 1]
+from core.snapping import build_master_separators, snap_bbox  #[cite: 6]
+from core.geometry_validation import GeometryValidationEngine  #[cite: 1]
+from core.geometry_repair import GeometryRepairEngine  #[cite: 1]
+from core.geometry import intersection_area, bbox_area  #[cite: 10]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("table-service")
@@ -29,6 +35,9 @@ app.add_middleware(
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Configurable Intersection over Box (IoB) Threshold for Grid Assignment
+IOB_THRESHOLD = 0.60
 
 logger.info("Loading Table Transformer detection model...")
 detection_processor = AutoImageProcessor.from_pretrained(
@@ -243,11 +252,65 @@ def recognize_structure(image: Image.Image, table_bbox: List[float]) -> Dict[str
     rows_raw.sort(key=lambda b: b[1])
     cols_raw.sort(key=lambda b: b[0])
 
+    # =========================================================================
+    # PRODUCTION PIPELINE INTEGRATION: DETERMINISTIC GEOMETRY PIPELINE[cite: 1]
+    # =========================================================================
+    # 1. Snapping Core track consolidation layer[cite: 1, 6]
+    master_x, master_y = build_master_separators(
+        [{"x_start": c[0], "x_end": c[2]} for c in cols_raw],
+        [{"y_start": r[1], "y_end": r[3]} for r in rows_raw]
+    )  #[cite: 6]
+
+    snapped_rows_raw = [snap_bbox(r, master_x, master_y) for r in rows_raw]  #[cite: 6]
+    snapped_cols_raw = [snap_bbox(c, master_x, master_y) for c in cols_raw]  #[cite: 6]
+    snapped_spanning_cells_raw = [snap_bbox(s, master_x, master_y) for s in spanning_cells_raw]  #[cite: 6]
+
+    # 2. Read-Only Diagnostic Validation Scanning Layer[cite: 1]
+    validation_report = GeometryValidationEngine.analyze(
+        snapped_rows_raw, snapped_cols_raw, snapped_spanning_cells_raw, table_bbox
+    )  #[cite: 1]
+
+    # 3. Dynamic Structural Wrapped Records Preserving Absolute Data Lineage
+    # Avoids hardcoding rowspan/colspan value fallbacks blindly[cite: 1]
+    wrapped_rows = [
+        {"bbox": s.copy(), "raw_bbox": r.copy(), "snapped_bbox": s.copy()}
+        for r, s in zip(rows_raw, snapped_rows_raw)
+    ]  #[cite: 1]
+    wrapped_cols = [
+        {"bbox": s.copy(), "raw_bbox": c.copy(), "snapped_bbox": s.copy()}
+        for c, s in zip(cols_raw, snapped_cols_raw)
+    ]  #[cite: 1]
+    wrapped_spanning = [
+        {
+            "bbox": s.copy(),
+            "raw_bbox": o.copy(),
+            "snapped_bbox": s.copy(),
+            "rowspan": o.get("rowspan", 1) if isinstance(o, dict) else 1,
+            "colspan": o.get("colspan", 1) if isinstance(o, dict) else 1,
+            "is_active": True
+        }
+        for o, s in zip(spanning_cells_raw, snapped_spanning_cells_raw)
+    ]  #[cite: 1]
+
+    # 4. Invariant Deterministic Geometry Healing[cite: 1]
+    repaired_rows, repaired_cols, repaired_cells = GeometryRepairEngine.apply(
+        wrapped_rows, wrapped_cols, wrapped_spanning, table_bbox, validation_report
+    )  #[cite: 1]
+
+    # Unpack healed geometries into working arrays[cite: 1]
+    final_rows_raw = [r["bbox"] for r in repaired_rows]  #[cite: 1]
+    final_cols_raw = [c["bbox"] for c in repaired_cols]  #[cite: 1]
+    final_spanning_cells_raw = [
+        cell["bbox"] for cell in repaired_cells 
+        if cell.get("rowspan", 1) > 1 or cell.get("colspan", 1) > 1
+    ]  #[cite: 1]
+    # =========================================================================
+
     table_width = x2 - x1
     table_height = y2 - y1
 
     columns = []
-    for i, box in enumerate(cols_raw):
+    for i, box in enumerate(final_cols_raw):  # Maps corrected column coordinates[cite: 1]
         cx1, _, cx2, _ = box
         width_pct = round(((cx2 - cx1) / table_width) * 100, 2)
         columns.append(
@@ -255,14 +318,15 @@ def recognize_structure(image: Image.Image, table_bbox: List[float]) -> Dict[str
         )
 
     rows = []
-    for i, box in enumerate(rows_raw):
+    for i, box in enumerate(final_rows_raw):  # Maps corrected row coordinates[cite: 1]
         _, ry1, _, ry2 = box
         height_pct = round(((ry2 - ry1) / table_height) * 100, 2)
         rows.append(
             {"index": i, "y_start": ry1, "y_end": ry2, "height_pct": height_pct}
         )
 
-    cells = build_cell_grid(rows_raw, cols_raw, spanning_cells_raw)
+    # Re-use the single unified build_cell_grid logic to reconstruct cell grid paths[cite: 1]
+    cells = build_cell_grid(final_rows_raw, final_cols_raw, final_spanning_cells_raw)  #[cite: 1]
 
     return {
         "bbox": [x1, y1, x2, y2],
@@ -283,14 +347,21 @@ def build_cell_grid(
     occupied = [[False] * n_cols for _ in range(n_rows)]
     cells = []
 
-    def overlaps(a, b) -> bool:
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        return not (ax2 <= bx1 or bx2 <= ax1 or ay2 <= by1 or by2 <= ay1)
-
     def find_span(box):
-        r_indices = [i for i, r in enumerate(rows_raw) if overlaps(box, r)]
-        c_indices = [i for i, c in enumerate(cols_raw) if overlaps(box, c)]
+        cell_area = bbox_area(box)  #[cite: 10]
+        if cell_area == 0.0:
+            return None
+
+        # Correction 2: Replaced simple rectangle overlap with deterministic IoB-based membership logic[cite: 10]
+        r_indices = [
+            i for i, r in enumerate(rows_raw)
+            if (intersection_area(box, r) / cell_area) > IOB_THRESHOLD  #[cite: 10]
+        ]
+        c_indices = [
+            i for i, c in enumerate(cols_raw)
+            if (intersection_area(box, c) / cell_area) > IOB_THRESHOLD  #[cite: 10]
+        ]
+        
         if not r_indices or not c_indices:
             return None
         return min(r_indices), max(r_indices), min(c_indices), max(c_indices)
